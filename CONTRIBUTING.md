@@ -133,6 +133,13 @@ If you're only touching the relay, CLI, or other server-side crates, you can
 skip this and run the narrower recipes instead — `just fmt-check`, `just
 clippy`, `just test-unit`, and `just test` need no GTK.
 
+#### NixOS
+
+Hermit's downloaded binaries do not run on NixOS. Use the flake's development
+shell instead (`nix develop`), which provides the toolchain and these system
+libraries. See [nix/README.md](nix/README.md), which also covers the relay
+package and NixOS module.
+
 ### First-Time Setup
 
 ```bash

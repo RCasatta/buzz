@@ -691,7 +691,11 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
 desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    # The Nix dev shell (flake.nix) provides the toolchain on NixOS, where
+    # Hermit's downloaded binaries cannot run.
+    if [[ "${BUZZ_NIX_DEV_SHELL:-}" != 1 ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
