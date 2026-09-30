@@ -53,6 +53,7 @@
             inherit craneLib;
             sourceSha = self.rev or "unknown";
           };
+          sprig = pkgs.callPackage ./nix/sprig.nix { inherit craneLib; };
           default = buzz-relay;
         }
       );
@@ -71,6 +72,7 @@
 
       nixosModules = rec {
         buzz-relay = import ./nix/nixos-module.nix self;
+        buzz-agent = import ./nix/nixos-agent-module.nix self;
         default = buzz-relay;
       };
 
@@ -94,7 +96,9 @@
         in
         {
           relay = packages.buzz-relay;
+          sprig = packages.sprig;
           relay-closure-has-no-gui = closureHasNoGui "buzz-relay" packages.buzz-relay;
+          sprig-closure-has-no-gui = closureHasNoGui "sprig" packages.sprig;
         }
       );
     };

@@ -1,6 +1,6 @@
 # Source for crane builds of the root Rust workspace: only what it compiles
 # from, so desktop, web, and mobile edits do not rebuild server-side packages.
-# `migrations/` is embedded by buzz-db.
+# `migrations/` is embedded by buzz-db, the capability manifest by buzz-agent.
 { lib }:
 
 lib.fileset.toSource {
@@ -12,5 +12,6 @@ lib.fileset.toSource {
     ../crates
     ../examples
     ../migrations
+    ../scripts/model-capabilities.json
   ];
 }

@@ -1,13 +1,15 @@
 # Nix flake
 
-`flake.nix` at the repository root serves two uses:
+`flake.nix` at the repository root serves three roles:
 
 | Output | Use |
 |--------|-----|
-| `devShells.<system>.default` | NixOS desktop: build and run the native Tauri app with `just desktop-standalone` |
-| `packages.<system>.buzz-relay` (also `default`) | NixOS server: `buzz-relay`, `buzz-admin`, `buzz-pair-relay` |
-| `nixosModules.buzz-relay` (also `default`) | NixOS server: systemd service for the relay |
-| `checks.<system>.relay`, `checks.<system>.relay-closure-has-no-gui` | Build the relay and verify its runtime closure has no GUI libraries |
+| `devShells.<system>.default` | Desktop machine: build and run the native Tauri app with `just desktop-standalone` |
+| `packages.<system>.buzz-relay` (also `default`) | Relay server: `buzz-relay`, `buzz-admin`, `buzz-pair-relay` |
+| `nixosModules.buzz-relay` (also `default`) | Relay server: systemd service for the relay |
+| `packages.<system>.sprig` | Agent host: `buzz-acp`, `buzz-agent`, `buzz-dev-mcp`, and the `buzz` CLI in one binary |
+| `nixosModules.buzz-agent` | Agent host: systemd services for headless agents |
+| `checks.<system>.{relay,sprig}`, `checks.<system>.{relay,sprig}-closure-has-no-gui` | Build both server packages and verify their runtime closures have no GUI libraries |
 
 Systems: `x86_64-linux`, `aarch64-linux`. Only `x86_64-linux` has been built.
 
@@ -28,7 +30,7 @@ Systems: `x86_64-linux`, `aarch64-linux`. Only `x86_64-linux` has been built.
   repository pins for CI, Docker, and Hermit. Bumping `rust-toolchain.toml` is
   picked up automatically; `nix flake update rust-overlay` is needed only when
   the new release is newer than the locked overlay.
-- **crane** builds the relay. `Cargo.lock` contains `sqlx-core 0.9.0` from both
+- **crane** builds the relay and Sprig. `Cargo.lock` contains `sqlx-core 0.9.0` from both
   crates.io and the patched sqlx git source; nixpkgs' `importCargoLock`,
   `fetchCargoVendor`, and `cargo vendor` all vendor into one directory keyed by
   name and version, so they cannot vendor this lockfile. Crane reads
@@ -209,6 +211,9 @@ Postgres, Redis, or storage. A single-host example:
               RELAY_OWNER_PUBKEY = "<64-hex owner pubkey>";
               BUZZ_REQUIRE_AUTH_TOKEN = true;
               BUZZ_REQUIRE_RELAY_MEMBERSHIP = true;
+              # Admits headless agents (see "Headless agent") through their
+              # owner's membership, via the NIP-OA tag in their profile.
+              BUZZ_ALLOW_NIP_OA_AUTH = true;
               BUZZ_AUTO_MIGRATE = true;
               RUST_LOG = "buzz_relay=info,buzz_db=info,buzz_auth=info,buzz_pubsub=info,tower_http=info";
             };
@@ -262,9 +267,111 @@ environment. With the peer-authenticated socket above, only the service's own
 `buzz-relay` role a password and use a TCP `DATABASE_URL`, so the migrated
 tables stay owned by the role the relay connects as.
 
+## Headless agent (NixOS agent host)
+
+A headless agent is the `buzz-acp` harness driving `buzz-agent`, with
+`buzz-dev-mcp` providing its shell and file tools. It only connects out to the
+relay, so the agent host needs no public exposure. `buzz-agent` can use any
+OpenAI-compatible endpoint (llama.cpp server, vLLM, Ollama, and similar), such
+as a local inference server. The model must handle tool calls: the agent
+answers by running `buzz messages send` through its shell tool.
+
+### 1. Mint the agent's identity (on the owner's machine)
+
+An agent needs its own keypair, a NIP-OA auth tag signed by its owner, and a
+profile that carries the tag. `buzz agents provision` creates all three, the
+same way Buzz Desktop does for managed agents. Run it with **your** key:
+
+```bash
+nix shell .#sprig --command env \
+  BUZZ_RELAY_URL=https://buzz.example.com \
+  BUZZ_PRIVATE_KEY='<your nsec or hex key>' \
+  buzz agents provision --display-name Ripper --about "Local inference agent" \
+    --env-file ./ripper-agent.env
+```
+
+It prints the agent's pubkey and writes `ripper-agent.env` (mode 0600, never
+overwriting an existing file) with `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, and
+`BUZZ_RELAY_URL`. If the relay rejects the profile, the file is removed again.
+
+The owner key is your own Buzz identity. In Buzz Desktop, the **Private key**
+row in Settings reveals it ("Reveal private key"). Prefer
+reading it from a file over typing it on the command line, for example
+`BUZZ_PRIVATE_KEY="$(cat ~/.config/buzz-owner.key)"`, and do not run this on
+the agent host.
+
+Then:
+
+- Copy `ripper-agent.env` to the agent host, outside the Nix store (for
+  example `/run/secrets/`, managed by sops-nix or agenix).
+- Add the LLM key to a second secret file:
+  `OPENAI_COMPAT_API_KEY='…'`. A local server that ignores the key still
+  needs a non-empty value.
+- Add the agent to channels from the desktop app or with
+  `buzz channels add-member --channel <UUID> --pubkey <agent pubkey> --role bot`.
+
+### 2. Run it (on the agent host)
+
+```nix
+{
+  inputs.buzz.url = "github:block/buzz";   # or "path:/home/you/git/buzz"
+
+  outputs = { nixpkgs, buzz, ... }: {
+    nixosConfigurations.ripper = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        buzz.nixosModules.buzz-agent
+        {
+          services.buzz-agents.ripper = {
+            environmentFiles = [
+              "/run/secrets/ripper-agent.env"      # from `buzz agents provision`
+              "/run/secrets/ripper-agent-llm.env"  # OPENAI_COMPAT_API_KEY
+            ];
+            settings = {
+              BUZZ_AGENT_PROVIDER = "openai-compat";
+              OPENAI_COMPAT_BASE_URL = "http://127.0.0.1:8080/v1";
+              OPENAI_COMPAT_MODEL = "<model id your server exposes>";
+            };
+          };
+          # Start after the inference server, if it runs on this host.
+          systemd.services.buzz-agent-ripper.after = [ "llama-cpp.service" ];
+        }
+      ];
+    };
+  };
+}
+```
+
+The module runs `buzz-agent-<name>.service` as a `DynamicUser`, with
+`/var/lib/buzz-agent-<name>` as its home and working directory:
+
+- **Harness wiring.** It runs `buzz-acp` with `BUZZ_ACP_AGENT_COMMAND=buzz-agent` and
+  `BUZZ_ACP_MCP_COMMAND=buzz-dev-mcp`, the same wiring the desktop and the
+  Kubernetes provider use.
+- **Who it answers.** Only its owner, the key that signed the auth tag. Set
+  `BUZZ_ACP_RESPOND_TO` (`owner-only`, `allowlist` with
+  `BUZZ_ACP_RESPOND_TO_ALLOWLIST`, `anyone`, `nobody`) to change that. The agent
+  runs shell commands on the host, so widen this deliberately.
+- **Restarts.** `Restart=on-failure`, never `always`: a clean exit, such as the
+  owner's `!shutdown`, stays final (docs/remote-agents.md, invariant I5).
+- **Evaluation guards.** Evaluation fails if `settings` contains a secret
+  (`BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`, `OPENAI_COMPAT_API_KEY`,
+  `ANTHROPIC_API_KEY`), since those would land in the world-readable Nix store.
+  It also fails on `BUZZ_ACP_NO_PRESENCE`, because presence is the owner's only
+  liveness signal.
+- **Tools on `PATH`.** The agent's shell tool finds bash, coreutils, findutils,
+  grep, sed, git, curl, and Sprig's `rg`, `tree`, and `buzz`. Add more with
+  `extraPackages`.
+- **Other hosts.** Run each agent key on one host only. The harness does not
+  stop a second launcher of the same key.
+
+Stop the agent with `systemctl stop buzz-agent-ripper`, or send it `!shutdown`
+from the owner's account. To retire the identity, delete the env file and
+archive the agent: `buzz agents archive <agent pubkey> --reason retired`.
+
 ## Validation record
 
-Performed on x86_64-linux (NixOS, Wayland session) on 2026-09-29:
+Desktop and relay, on x86_64-linux (NixOS, Wayland session), 2026-09-29:
 
 - `nix flake check`: relay build and `relay-closure-has-no-gui` pass. The
   closure check matches 8 paths in a WebKitGTK closure and 0 in the relay's
@@ -288,6 +395,30 @@ Performed on x86_64-linux (NixOS, Wayland session) on 2026-09-29:
   startup fixes: clearing a host `LD_LIBRARY_PATH`, and unlocking the login
   keyring (see "Runtime needs").
 
+Agent host, on 2026-09-30:
+
+- `nix flake check` passes all four checks. Sprig builds with the `sprig` Cargo
+  profile, and its closure has no GUI libraries.
+- `buzz-cli`: `cargo test -p buzz-cli` (500 tests, including 7 for
+  `agents provision`), `cargo clippy -p buzz-cli --all-targets -- -D warnings`,
+  and `cargo fmt --all -- --check` pass.
+- End to end, against a throwaway relay closed like production
+  (`BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, `BUZZ_ALLOW_NIP_OA_AUTH=true`,
+  `RELAY_OWNER_PUBKEY` set):
+  - `buzz agents provision` wrote a 0600 env file and published the agent's
+    profile.
+  - `systemd-run --user -p EnvironmentFile=` kept the auth tag as strict JSON.
+  - `buzz-acp` from the Nix-built Sprig connected and resolved its owner from
+    the tag. The relay admitted it through NIP-OA without adding it as a relay
+    member.
+  - The owner's mention reached the agent. `buzz-agent` called a mock
+    OpenAI-compatible server over `/v1/chat/completions`, ran the returned
+    `shell` tool call through `buzz-dev-mcp`, and its
+    `buzz messages send` reply appeared in the channel.
+- The agent module evaluated with the example above (unit, environment,
+  `EnvironmentFile`, `Restart=on-failure`). Both guards fire: a secret in
+  `settings`, and `BUZZ_ACP_NO_PRESENCE`.
+
 Not validated:
 
 - A deployment on a NixOS server, or a NixOS VM test of the module: this
@@ -298,3 +429,10 @@ Not validated:
   plugins), beyond the app starting and working for its user.
 - `just mesh=1 desktop-standalone`, `aarch64-linux`, and the other Justfile
   recipes, which still use Hermit.
+- The agent module as a real systemd service on a NixOS host (DynamicUser,
+  hardening, and the shell tool under `ProtectSystem=strict`). The end-to-end
+  run used the same binary and environment, but outside systemd.
+- A real local model. Tool-call reliability depends on the model and on the
+  inference server's chat template.
+- The agent answering only its owner. `owner-only` is the harness default and
+  was not exercised against a second user.
