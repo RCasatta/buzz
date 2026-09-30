@@ -1403,7 +1403,7 @@ pub fn normalize_relay_url(url: &str) -> String {
 }
 
 /// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.
-fn to_ws_url(http_url: &str) -> String {
+pub(crate) fn to_ws_url(http_url: &str) -> String {
     http_url
         .replace("https://", "wss://")
         .replace("http://", "ws://")

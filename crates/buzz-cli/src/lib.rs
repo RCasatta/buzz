@@ -394,6 +394,29 @@ buzz agents unarchive <PUBKEY> --reason returned"
         #[arg(long, default_value_t = false)]
         admin: bool,
     },
+    /// Mint a headless agent identity owned by you and write its launcher env file
+    #[command(
+        after_help = "Run with your own key (BUZZ_PRIVATE_KEY), not an agent's. Generates an agent \
+keypair, signs its NIP-OA auth tag with your key, publishes the agent's kind:0 profile, and \
+writes BUZZ_PRIVATE_KEY, BUZZ_AUTH_TAG, and BUZZ_RELAY_URL to --env-file (created with mode \
+0600; an existing file is never replaced). The file is removed again if the profile is not \
+accepted. Load it with systemd EnvironmentFile= or `set -a; . FILE` and start buzz-acp. On a \
+closed relay the agent is admitted through your membership only when the relay sets \
+BUZZ_ALLOW_NIP_OA_AUTH=true.\n\n\
+Examples:\n  \
+buzz agents provision --display-name Ripper --env-file ./ripper-agent.env"
+    )]
+    Provision {
+        /// Display name published in the agent's profile
+        #[arg(long)]
+        display_name: String,
+        /// Optional profile description
+        #[arg(long)]
+        about: Option<String>,
+        /// Environment file to create for the agent's launcher (must not exist)
+        #[arg(long)]
+        env_file: std::path::PathBuf,
+    },
     /// Read the relay's current NIP-IA archive snapshot (kind 13535)
     #[command(
         after_help = "Verifies the snapshot's NIP-11 `self` authorship, event id, signature, \
@@ -2436,6 +2459,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "provision",
                 "unarchive"
             ]
         );
@@ -2579,7 +2603,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 4),
             ("channels", 16),
             ("dms", 4),

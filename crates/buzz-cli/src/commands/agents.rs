@@ -164,6 +164,19 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
         }
 
         AgentsCmd::Archived => cmd_archived(client).await,
+        AgentsCmd::Provision {
+            display_name,
+            about,
+            env_file,
+        } => {
+            super::agent_provision::cmd_provision(
+                client,
+                &display_name,
+                about.as_deref(),
+                &env_file,
+            )
+            .await
+        }
     }
 }
 
